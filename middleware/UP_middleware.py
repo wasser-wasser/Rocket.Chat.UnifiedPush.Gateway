@@ -8,27 +8,67 @@ import sqlite3
 
 ## for VAPID
 from pywebpush import webpush, WebPushException
-## see https://docs.ntfy.sh/config/?h=vapid#web-push
-vapid_private_key = os.getenv("vapid_private_key", "private")
-vapid_public_key = os.getenv("vapid_public_key", "public")
+vapid_private_key = os.getenv("vapid_private_key", "")
+vapid_public_key = os.getenv("vapid_public_key", "")
 TOPIC_TOKEN = os.getenv("NTFY_AUTH_TOKEN", "")
-# - web-push-file=/var/cache/ntfy/webpush.db
-
-## TODO VAPID <--< web-push-file=/var/cache/ntfy/webpush.db
-
-## where is RC?
-ROCKETCHAT_URL =  os.getenv("ROCKETCHAT_URL", "http://localhost:3000")
-
-app = Flask(__name__)
+VAPID_DB_PATH = os.getenv("VAPID_DB_PATH", "/var/cache/ntfy/webpush.db")
 
 # Connect to Redis (Docker-based, default settings) to store the user ->UnifiedPush topic etc
 redis_host = os.getenv("REDIS_HOST", "localhost")
 redis_port = int(os.getenv("REDIS_PORT", 6379))
 redis_client = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
 
+## where is RC?
+ROCKETCHAT_URL =  os.getenv("ROCKETCHAT_URL", "http://localhost:3000")
+
+app = Flask(__name__)
+
+#################################
+# # === FUNCTION: Load VAPID subscriptions from the database ===
+def get_subscriptions(db_path, topic_filter=None):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    query = "SELECT endpoint, p256dh, auth, topic FROM subscriptions"
+    params = ()
+    if topic_filter:
+        query += " WHERE topic = ?"
+        params = (topic_filter,)
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+    subscriptions = []
+    for endpoint, p256dh, auth, topic in rows:
+        subscriptions.append({
+            "endpoint": endpoint,
+            "keys": {
+                "p256dh": p256dh,
+                "auth": auth
+            },
+            "topic": topic
+        })
+    return subscriptions
+
+
+# # === FUNCTION: Send encrypted push ===
+def send_push(sub, payload):
+    try:
+        response = webpush(
+            subscription_info={
+                "endpoint": sub["endpoint"],
+                "keys": sub["keys"]
+            },
+            data=payload,
+            vapid_private_key=vapid_private_key,
+            vapid_claims={"sub": VAPID_EMAIL}
+        )
+        print(f"✅ Sent to {sub['endpoint']} (topic: {sub['topic']})")
+    except WebPushException as ex:
+        print(f"❌ error {sub['endpoint']}: {repr(ex)}")
+
+
 def is_authenticated_RC(user_id, auth_token):
     """
-    validate the user's RC creds are correct. if not they should not be able to get anything 
+    validate the user's RC credentials are correct. if not they should not be able to get anything 
     """
     headers = {"X-User-Id":user_id, "X-Auth-Token":auth_token}
     try:
@@ -62,11 +102,8 @@ def register(topic, format):
         "format": format
     }))
     try:
-        # Forward headers (you can strip or filter some if needed)
         headers = {key: value for key, value in request.headers if key.lower() != 'host'}
-        # Forward the request using the same method and params
         resp = requests.get(base_url, headers=headers, params=request.args)
-        # Relay the response back to the original client
         return Response(
             resp.content,
             status=resp.status_code,
@@ -104,7 +141,6 @@ def register_post():
 def vapid_public_key():
     return jsonify({"webpush-public-key": vapid_public_key}), 200
 
-
 @app.route("/authenticate", methods=["GET"])
 def up_authenticate():
     ''' for LDAP over of NTFY '''
@@ -133,7 +169,7 @@ def rocket_webhook_direct():
     user_name = data['user_name']
     message_id = data['message_id']
     message = data.get("text")
-    sit_url = data.get("siteUrl")
+    site_url = data.get("siteUrl")
     reciever = ''
     if not timestamp or not message:
         return jsonify({"error": "Invalid payload"}), 400
@@ -144,7 +180,7 @@ def rocket_webhook_direct():
     # print(f'message {user_id} -> {reciever} ')
     # user = data.get(user_id, {}).get("username")
     endpoint = redis_client.get(reciever)
-    print(f'"{reciever}"  is registered to "{endpoint}"')
+    # print(f'"{reciever}"  is registered to "{endpoint}"')
     if not endpoint:
         return jsonify({"error": "No endpoint registered for user"}), 404
     payload = {
@@ -154,13 +190,14 @@ def rocket_webhook_direct():
     payload = {"message": message,  "decrypted": "true", 
     # "channel_id":channel_id, "message_id": message_id,
      "user_name":user_name, "timestamp": timestamp,
-    "host":sit_url, "type": "d", "rid":channel_id,
-    "url":"rocketchat://host=%s?rid=%s" % (sit_url.lstrip("https://").lstrip("http://"), channel_id)}
+    "host":site_url, "type": "d", "rid":channel_id,
+    "url":"rocketchat://host=%s?rid=%s" % (site_url.lstrip("https://").lstrip("http://"), channel_id)}
     try:
-        response = requests.post(endpoint, json=payload, headers={
-            "Authorization":f"Basic {TOPIC_TOKEN}",
-            "Content-Type" : "application/json"
-        })
+        # print(payload)
+        headers={ "Content-Type" : "application/json" }
+        if site_url in endpoint:
+            headers["Authorization"] = f"Basic {TOPIC_TOKEN}"
+        response = requests.post(endpoint, json=payload, headers=headers)
         response.raise_for_status()
         return jsonify({"message": "Notification sent"}), 200
     except requests.RequestException as e:
