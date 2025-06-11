@@ -1,0 +1,21 @@
+---
+- name: Launch ngnx, redis, ntfy, and UP middleware
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Ensure Docker is installed
+      package:
+        name: docker
+        state: present
+
+    - name: Ensure Docker Compose is installed (if using plugin version)
+      get_url:
+        url: https://github.com/docker/compose/releases/download/v2.23.3/docker-compose-linux-x86_64
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+      when: ansible_facts['os_family'] == "Debian"  # Adjust if needed
+
+    - name: Pull or build containers
+      command: docker-compose -f compose.yml up -d --build
+      args:
+        chdir: "{{ playbook_dir }}"
