@@ -1,0 +1,69 @@
+
+services:
+  nginx:
+    image: nginxproxy/nginx-proxy:1.7-alpine  # Prebuilt Nginx proxy image
+    container_name: nginx-proxy
+    network_mode: host
+    ports:
+      - "80:80"   # HTTP traffic
+      - "443:443" # HTTPS traffic
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro  # This is for dynamic proxy configuration
+      # Mount the custom configs
+      - /nginx.conf:/etc/nginx/nginx.conf:ro 
+      - /cert.pem:/etc/nginx/ssl/cert.pem:ro
+      - /key.pem:/etc/nginx/ssl/privkey.pem:ro
+      - /cert.pem:/etc/nginx/ssl/cert_self_signed.pem:ro
+      - /key.pem:/etc/nginx/ssl/key_self_signed.pem:ro
+    # depends_on:
+      # - ntfy
+
+  up_middleware:
+    build:
+      context: ./middleware
+    environment:
+      - vapid_private_key=CHANGEME
+      - vapid_public_key=CHANGEME
+      - NTFY_AUTH_TOKEN=CHANGEME
+      - REDIS_HOST=redis
+      - ROCKETCHAT_URL=http://host.docker.internal:3000
+    ports:
+      - "5001:5001"
+    restart: always
+    container_name: up_middleware
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  ntfy:
+    image: binwiederhier/ntfy
+    container_name: ntfy
+    command:
+      - serve 
+    environment:
+      - TZ=UTC
+      - NTFY_BASE_URL=https://CHANGEME_EXTERNAL_URL_FOR NTFY in case one is needed
+      - NTFY_CACHE_FILE=/var/lib/ntfy/cache.db
+      - NTFY_AUTH_FILE=/var/lib/ntfy/auth.db
+      - NTFY_AUTH_DEFAULT_ACCESS=read-only
+      - NTFY_BEHIND_PROXY=true
+      - web-push-file=/var/cache/ntfy/webpush.db
+      - web-push-public-key=CHANGEME
+      - web-push-private-key=CHANGEME
+    volumes:
+      - /var/cache/ntfy:/var/cache/ntfy
+      - /home/ubuntu/dev/ngnx/ntfy/lib:/var/lib/ntfy
+    ports:
+      - 8081:80
+    healthcheck:
+        test: ["CMD-SHELL", "wget -q --tries=1 http://localhost:80/v1/health -O - | grep -Eo '\"healthy\"\\s*:\\s*true' || exit 1"]
+        interval: 60s
+        timeout: 10s
+        retries: 3
+        start_period: 40s
+    restart: unless-stopped
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+  
